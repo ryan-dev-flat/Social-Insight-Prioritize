@@ -6,7 +6,7 @@ export interface CarouselSlide {
 
 export interface Insight {
   id: string;
-  originalText: string;
+  originalText?: string;
   informativeScore: number;
   inspiringScore: number;
   viralScore: number;

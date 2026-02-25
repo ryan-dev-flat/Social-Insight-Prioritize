@@ -2,11 +2,23 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Insight } from "../types";
 
-export const analyzeTranscript = async (content: string): Promise<Insight[]> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
+// P-1: cache the client at module level; only re-instantiate when the key changes
+let _aiClient: GoogleGenAI | null = null;
+let _aiClientKey = '';
+
+const getAiClient = (apiKey: string): GoogleGenAI => {
+  if (_aiClient === null || apiKey !== _aiClientKey) {
+    _aiClient = new GoogleGenAI({ apiKey });
+    _aiClientKey = apiKey;
+  }
+  return _aiClient;
+};
+
+export const analyzeTranscript = async (content: string, apiKey: string): Promise<Insight[]> => {
+  const ai = getAiClient(apiKey);
   
   const response = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
+    model: "gemini-2.0-flash",
     contents: `Analyze the following transcript content. Extract the top 5-8 distinct, high-impact insights that would make for compelling social media content. 
     For each insight, provide:
     - A summary of the core idea

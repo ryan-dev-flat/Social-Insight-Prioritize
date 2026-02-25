@@ -1,7 +1,8 @@
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import { AppStatus, Insight, CarouselSlide } from './types';
 import { analyzeTranscript } from './services/geminiService';
+import { cleanVttTranscript } from './utils/transcript';
 
 const CarouselPreview: React.FC<{ slides: CarouselSlide[] }> = ({ slides }) => {
   const [activeSlide, setActiveSlide] = useState(0);
@@ -61,20 +62,65 @@ const ScoreBar: React.FC<{ label: string; score: number }> = ({ label, score }) 
   </div>
 );
 
+const ALLOWED_EXTENSIONS = new Set(['.vtt', '.md', '.txt']);
+const MAX_FILE_BYTES = 5 * 1024 * 1024; // 5 MB — generous for any transcript; prevents full read of huge files
+
 const App: React.FC = () => {
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
   const [insights, setInsights] = useState<Insight[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [apiKey, setApiKey] = useState<string>(
+    () => sessionStorage.getItem('gemini_api_key') ?? ''
+  );
+  const keyInputRef = useRef<HTMLInputElement>(null);
 
-  const processFile = async (file: File) => {
+  const handleSaveKey = () => {
+    const trimmed = keyInputRef.current?.value.trim() ?? '';
+    if (!trimmed) return;
+    sessionStorage.setItem('gemini_api_key', trimmed);
+    setApiKey(trimmed);
+  };
+
+  const handleClearKey = () => {
+    sessionStorage.removeItem('gemini_api_key');
+    setApiKey('');
+    setStatus(AppStatus.IDLE);
+    setInsights([]);
+  };
+
+  // Q-1: wrap in useCallback so onDrop always closes over the current processFile
+  const processFile = useCallback(async (file: File) => {
     setStatus(AppStatus.READING);
     setError(null);
-    
+
+    // Q-3: guard against a missing key reaching this point
+    if (!apiKey) {
+      setError('No API key found. Please refresh the page and enter your Gemini API key.');
+      setStatus(AppStatus.ERROR);
+      return;
+    }
+
+    // S-2: validate extension before touching file contents
+    const ext = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`;
+    if (!ALLOWED_EXTENSIONS.has(ext)) {
+      setError(`Unsupported file type "${ext}". Please upload a .vtt, .md, or .txt file.`);
+      setStatus(AppStatus.ERROR);
+      return;
+    }
+
+    // P-2: validate size before reading the whole file into memory
+    if (file.size > MAX_FILE_BYTES) {
+      setError(`File too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). Please upload a file under 5 MB.`);
+      setStatus(AppStatus.ERROR);
+      return;
+    }
+
     try {
       const text = await file.text();
       setStatus(AppStatus.ANALYZING);
-      const cleanedText = text.replace(/\d{2}:\d{2}:\d{2}.\d{3} --> \d{2}:\d{2}:\d{2}.\d{3}/g, '');
-      const results = await analyzeTranscript(cleanedText);
+      // B-4: use the extracted utility (correct regex, strips header/cue numbers/NOTE blocks)
+      const cleanedText = cleanVttTranscript(text);
+      const results = await analyzeTranscript(cleanedText, apiKey);
       setInsights(results);
       setStatus(AppStatus.SUCCESS);
     } catch (err) {
@@ -82,24 +128,75 @@ const App: React.FC = () => {
       setError(err instanceof Error ? err.message : "An unexpected error occurred.");
       setStatus(AppStatus.ERROR);
     }
-  };
+  }, [apiKey]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) processFile(file);
   };
 
+  // Q-1: depend on processFile so we always call the fresh version
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     const file = e.dataTransfer.files?.[0];
     if (file) processFile(file);
-  }, []);
+  }, [processFile]);
+
+  if (!apiKey) {
+    return (
+      <div className="min-h-screen p-4 md:p-8 max-w-5xl mx-auto">
+        <header className="mb-12 text-center">
+          <h1 className="text-4xl font-bold text-slate-900 mb-2">Insight Prioritizer</h1>
+          <p className="text-slate-500 font-medium">Transcripts &rarr; Viral Content &rarr; Carousel Previews</p>
+        </header>
+        <div className="glass border border-slate-200 rounded-3xl p-12 max-w-lg mx-auto text-center shadow-sm">
+          <div className="mb-4 flex justify-center">
+            <div className="bg-blue-600 text-white p-4 rounded-full shadow-lg">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+              </svg>
+            </div>
+          </div>
+          <h2 className="text-xl font-semibold mb-2">Enter your Gemini API Key</h2>
+          <p className="text-slate-500 text-sm mb-6">
+            Your key is stored only in this browser tab's session and is never sent anywhere except directly to Google's API.
+          </p>
+          <input
+            ref={keyInputRef}
+            type="password"
+            placeholder="AIza..."
+            className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm font-mono mb-4 focus:outline-none focus:ring-2 focus:ring-blue-400"
+            onKeyDown={(e) => e.key === 'Enter' && handleSaveKey()}
+          />
+          <button
+            onClick={handleSaveKey}
+            className="w-full bg-slate-900 text-white font-bold py-3 rounded-xl hover:bg-slate-800 transition-colors"
+          >
+            Save &amp; Continue
+          </button>
+          <p className="mt-4 text-xs text-slate-400">
+            Don't have a key?{' '}
+            <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-blue-500 underline">
+              Get one free from Google AI Studio
+            </a>
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen p-4 md:p-8 max-w-5xl mx-auto">
-      <header className="mb-12 text-center">
+      <header className="mb-12 text-center relative">
         <h1 className="text-4xl font-bold text-slate-900 mb-2">Insight Prioritizer</h1>
         <p className="text-slate-500 font-medium">Transcripts &rarr; Viral Content &rarr; Carousel Previews</p>
+        <button
+          onClick={handleClearKey}
+          className="absolute right-0 top-1 text-xs text-slate-400 hover:text-red-500 transition-colors"
+          title="Clear saved API key"
+        >
+          Clear API Key
+        </button>
       </header>
 
       {status === AppStatus.IDLE || status === AppStatus.ERROR ? (
